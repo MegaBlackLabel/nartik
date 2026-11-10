@@ -82,6 +82,7 @@ describe('PackManager', () => {
       const exists = await manager.hasPack(packId)
       expect(exists).toBe(true)
     })
+
   })
 
   describe('openPack', () => {
@@ -178,6 +179,7 @@ describe('PackManager', () => {
 
       await expect(manager.readFile(packId, 'missing.txt')).rejects.toThrow('Entry not found')
     })
+
   })
 
   describe('hasPack', () => {
@@ -216,6 +218,36 @@ describe('PackManager', () => {
 
       const list = await storage.list()
       expect(list.sort()).toEqual(['pack-a', 'pack-b'])
+    })
+  })
+
+  describe('createPack with a pack root key (v3 encryption)', () => {
+    it('encrypts the pack when packRootKey is provided', async () => {
+      const files = createTestFiles()
+      const packId = 'test-pack-key'
+      const packRootKey = Uint8Array.from({ length: 32 }, (_, index) => index)
+      await expect(
+        manager.createPack(packId, files, { packRootKey }),
+      ).resolves.toBeUndefined()
+      expect(await manager.hasPack(packId)).toBe(true)
+    })
+
+    it('readFile requires the pack root key for an encrypted pack', async () => {
+      const files = createTestFiles()
+      const packId = 'test-pack-unbound'
+      await manager.createPack(packId, files)
+
+      // 平文の pack は鍵なしで読める
+      const plain = await manager.readFile(packId, 'hello.txt')
+      expect(new TextDecoder().decode(plain)).toBe('hello world')
+
+      const encryptedPackId = 'test-pack-encrypted'
+      const packRootKey = Uint8Array.from({ length: 32 }, (_, index) => index)
+      await manager.createPack(encryptedPackId, files, { packRootKey })
+
+      await expect(manager.readFile(encryptedPackId, 'hello.txt')).rejects.toThrow(
+        'pack key required',
+      )
     })
   })
 })

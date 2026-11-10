@@ -22,7 +22,7 @@ describe('SQLitePackStorage', () => {
       createdAt: new Date('2024-01-01'),
     }
 
-    await storage.insertPack('book-123', metadata, 1024, 'packs/book-123.opfspack', false)
+    await storage.insertPack('book-123', metadata, 1024, 'packs/book-123.nartik', false)
 
     const retrieved = await storage.getPackMetadata('book-123')
     expect(retrieved).toBeDefined()
@@ -38,7 +38,7 @@ describe('SQLitePackStorage', () => {
       createdAt: new Date(),
     }
 
-    await storage.insertPack('book-456', metadata, 2048, 'packs/book-456.opfspack', true)
+    await storage.insertPack('book-456', metadata, 2048, 'packs/book-456.nartik', true)
     
     const entries = [
       {
@@ -75,7 +75,7 @@ describe('SQLitePackStorage', () => {
       createdAt: new Date(),
     }
 
-    await storage.insertPack('book-789', metadata, 512, 'packs/book-789.opfspack', false)
+    await storage.insertPack('book-789', metadata, 512, 'packs/book-789.nartik', false)
     
     await storage.insertEntries('book-789', [
       {
@@ -102,8 +102,8 @@ describe('SQLitePackStorage', () => {
       createdAt: new Date(),
     }
 
-    await storage.insertPack('pack-a', metadata, 100, 'packs/pack-a.opfspack', false)
-    await storage.insertPack('pack-b', metadata, 200, 'packs/pack-b.opfspack', false)
+    await storage.insertPack('pack-a', metadata, 100, 'packs/pack-a.nartik', false)
+    await storage.insertPack('pack-b', metadata, 200, 'packs/pack-b.nartik', false)
 
     const packs = await storage.list()
     expect(packs).toHaveLength(2)
@@ -119,7 +119,7 @@ describe('SQLitePackStorage', () => {
       createdAt: new Date(),
     }
 
-    await storage.insertPack('pack-to-delete', metadata, 100, 'packs/pack-to-delete.opfspack', false)
+    await storage.insertPack('pack-to-delete', metadata, 100, 'packs/pack-to-delete.nartik', false)
     await storage.insertEntries('pack-to-delete', [
       {
         path: 'test.txt',

@@ -3,7 +3,7 @@ import initWasm, {
   PackIndexParser,
   AesGcmCipher,
   generate_random_iv,
-} from '../wasm/pkg/opfspack_wasm'
+} from '../wasm/pkg/nartik_wasm'
 import { crc32 as jsCrc32 } from './format'
 
 let wasmReady: Promise<void> | null = null
@@ -19,7 +19,7 @@ async function ensureWasmReady(): Promise<void> {
         wasmAvailable = false
       })
   }
-  await wasmReady
+  return wasmReady
 }
 
 export async function crc32(data: Uint8Array): Promise<number> {
@@ -44,15 +44,7 @@ export async function parseIndex(
   await ensureWasmReady()
   
   if (wasmAvailable) {
-    return PackIndexParser.parse_index(data, entryCount).map((entry: {
-      path: string
-      mime_type: string
-      offset: bigint
-      size: bigint
-      compressed_size: bigint
-      flags: number
-      iv: Uint8Array
-    }) => ({
+    return PackIndexParser.parse_index(data, entryCount).map((entry) => ({
       path: entry.path,
       mimeType: entry.mime_type,
       offset: entry.offset,

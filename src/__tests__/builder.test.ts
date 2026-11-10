@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
+import { expectBytesEqual } from './byte-compare'
 import { PackBuilder } from '../builder'
+import { PackReader } from '../reader'
+import { PackKeyError } from '../errors'
 import {
   deserializeHeader,
   deserializeIndexEntry,
@@ -61,7 +64,7 @@ describe('PackBuilder', () => {
 
       const header = deserializeHeader(pack)
       expect(validateMagic(header.magic)).toBe(true)
-      expect(header.version).toBe(2)
+      expect(header.version).toBe(3)
       expect(header.flags).toBe(PackFlags.None)
       expect(header.entryCount).toBe(0)
       expect(header.indexOffset).toBe(BigInt(HEADER_SIZE))
@@ -474,12 +477,13 @@ describe('PackBuilder', () => {
     })
   })
 
-  describe('identity binding', () => {
-    it('encrypts entry when identityBinding is enabled', async () => {
+  describe('v3 encryption (packRootKey)', () => {
+    const PRK = Uint8Array.from({ length: 32 }, (_, index) => index)
+
+    it('encrypts every entry when packRootKey + packId are given', async () => {
       const builder = new PackBuilder({
         createdAt: MOCK_TIME,
-        identityBinding: true,
-        sub: 'user-sub-test',
+        packRootKey: PRK,
         packId: 'pack-test-123',
       })
       const data = new TextEncoder().encode('secret message')
@@ -487,6 +491,7 @@ describe('PackBuilder', () => {
       const pack = await builder.build()
 
       const header = deserializeHeader(pack.slice(0, HEADER_SIZE))
+      expect(header.version).toBe(3)
       expect(header.flags & PackFlags.Encrypted).toBeTruthy()
 
       const indexOffset = Number(header.indexOffset)
@@ -494,20 +499,39 @@ describe('PackBuilder', () => {
       const entry = deserializeIndexEntry(indexBuf)
 
       expect(entry.flags & EntryFlags.Encrypted).toBeTruthy()
-      expect(entry.flags & EntryFlags.IdentityBound).toBeTruthy()
+      // v3 は IDENTITY_BOUND を立てない（立っていれば読めない pack になる）
+      expect(entry.flags & EntryFlags.IdentityBound).toBeFalsy()
       expect(entry.iv).not.toEqual(new Uint8Array(12))
 
       const encryptedData = readEntryData(pack, entry.offset, entry.compressedSize || entry.size)
       expect(encryptedData).not.toEqual(data)
     })
 
-    it('does not encrypt when identityBinding is disabled', async () => {
-      const builder = new PackBuilder({ createdAt: MOCK_TIME, identityBinding: false })
+    it('round-trips an encrypted entry through the pack root key', async () => {
+      const builder = new PackBuilder({
+        createdAt: MOCK_TIME,
+        packRootKey: PRK,
+        packId: 'pack-roundtrip',
+      })
+      builder.addEntry('secret.txt', new TextEncoder().encode('round trip'), 'text/plain')
+      const pack = await builder.build()
+
+      const reader = PackReader.fromBuffer(pack)
+      const data = await reader.readEntry('secret.txt', {
+        packRootKey: PRK,
+        packId: 'pack-roundtrip',
+      })
+      expect(new TextDecoder().decode(data)).toBe('round trip')
+    })
+
+    it('writes a plaintext v3 pack without packRootKey', async () => {
+      const builder = new PackBuilder({ createdAt: MOCK_TIME })
       const data = new TextEncoder().encode('public message')
       builder.addEntry('public.txt', data, 'text/plain')
       const pack = await builder.build()
 
       const header = deserializeHeader(pack.slice(0, HEADER_SIZE))
+      expect(header.version).toBe(3)
       expect(header.flags & PackFlags.Encrypted).toBeFalsy()
 
       const indexOffset = Number(header.indexOffset)
@@ -516,6 +540,11 @@ describe('PackBuilder', () => {
 
       expect(entry.flags & EntryFlags.Encrypted).toBeFalsy()
       expect(entry.flags & EntryFlags.IdentityBound).toBeFalsy()
+    })
+
+    it('rejects packRootKey without packId (黙って平文にしない)', () => {
+      expect(() => new PackBuilder({ packRootKey: PRK })).toThrow(PackKeyError)
+      expect(() => new PackBuilder({ packId: 'pack-1' })).toThrow(PackKeyError)
     })
   })
 
@@ -585,7 +614,7 @@ describe('PackBuilder', () => {
       expect(entry.size).toBe(BigInt(largeData.byteLength))
 
       const entryData = readEntryData(pack, entry.offset, entry.size)
-      expect(entryData).toEqual(largeData)
+      expectBytesEqual(entryData, largeData)
     })
 
     it('handles ArrayBuffer input', async () => {

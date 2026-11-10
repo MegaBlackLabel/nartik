@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { expectBytesEqual } from './byte-compare'
 import { PackBuilder } from '../builder'
 import { PackReader } from '../reader'
 import { PackCorruptedError, PackVersionError, PackNotFoundError } from '../errors'
@@ -340,7 +341,7 @@ describe('Fuzz: Boundary tests', () => {
     const reader = PackReader.fromBuffer(pack)
 
     const readData = await reader.readEntry('large.bin')
-    expect(new Uint8Array(readData)).toEqual(data)
+    expectBytesEqual(new Uint8Array(readData), data)
     reader.close()
   })
 

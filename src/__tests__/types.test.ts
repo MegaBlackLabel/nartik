@@ -82,10 +82,10 @@ describe('PackOptions', () => {
   it('should allow all options', () => {
     const opts: PackOptions = {
       compression: 'deflate',
-      identityBinding: true,
+      packRootKey: new Uint8Array(32),
     }
     expect(opts.compression).toBe('deflate')
-    expect(opts.identityBinding).toBe(true)
+    expect(opts.packRootKey).toBeInstanceOf(Uint8Array)
   })
 
   it('should allow compression none', () => {
@@ -93,9 +93,9 @@ describe('PackOptions', () => {
     expect(opts.compression).toBe('none')
   })
 
-  it('should have identityBinding as optional and default to false when not specified', () => {
+  it('should have packRootKey optional (鍵が無ければ平文の pack を書く)', () => {
     const opts: PackOptions = {}
-    expect(opts.identityBinding).toBeUndefined()
+    expect(opts.packRootKey).toBeUndefined()
   })
 })
 
@@ -108,6 +108,11 @@ describe('ReadOptions', () => {
   it('should allow decompress option', () => {
     const opts: ReadOptions = { decompress: true }
     expect(opts.decompress).toBe(true)
+  })
+
+  it('should allow pack root key + pack id (v3 の復号)', () => {
+    const opts: ReadOptions = { packRootKey: new Uint8Array(32), packId: 'pack-1' }
+    expect(opts.packId).toBe('pack-1')
   })
 })
 
