@@ -1,6 +1,6 @@
 {
   "name": "@megablacklabel/nartik",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser-native pack file system for OPFS (Origin Private File System)",
   "type": "module",
   "private": false,
