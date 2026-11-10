@@ -78,6 +78,34 @@ interface ResolvedPackKey {
   cacheTag: string
 }
 
+/**
+ * `packRootKey` の同一性判定に使うバッファと範囲。
+ *
+ * `ArrayBuffer` は呼び出しのたびに `new Uint8Array(...)` でビューを作り直すため、
+ * ビューの参照比較では同じ鍵でもメモが効かない。同じバッファの同じ範囲なら
+ * 同じ鍵として扱う（ビューを作り直しても一致する）。
+ */
+interface PackKeySource {
+  buffer: ArrayBufferLike
+  byteOffset: number
+  byteLength: number
+}
+
+function packKeySource(key: Uint8Array | ArrayBuffer): PackKeySource {
+  if (key instanceof Uint8Array) {
+    return { buffer: key.buffer, byteOffset: key.byteOffset, byteLength: key.byteLength }
+  }
+  return { buffer: key, byteOffset: 0, byteLength: key.byteLength }
+}
+
+function samePackKeySource(a: PackKeySource, b: PackKeySource): boolean {
+  return (
+    a.buffer === b.buffer &&
+    a.byteOffset === b.byteOffset &&
+    a.byteLength === b.byteLength
+  )
+}
+
 /** `Uint8Array` を `ArrayBuffer` として渡す（コピーが要るときだけコピーする）。 */
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
@@ -161,7 +189,7 @@ export class PackReader {
   private cache: LRUCache
   private packKeyMemo: {
     packId: string
-    packRootKey: Uint8Array
+    packRootKeySource: PackKeySource
     resolved: Promise<ResolvedPackKey>
   } | null = null
 
@@ -327,8 +355,13 @@ export class PackReader {
     }
     const prk =
       packRootKey instanceof Uint8Array ? packRootKey : new Uint8Array(packRootKey)
+    const packRootKeySource = packKeySource(packRootKey)
     const memo = this.packKeyMemo
-    if (memo && memo.packId === packId && memo.packRootKey === prk) {
+    if (
+      memo &&
+      memo.packId === packId &&
+      samePackKeySource(memo.packRootKeySource, packRootKeySource)
+    ) {
       return memo.resolved
     }
     const resolved = (async (): Promise<ResolvedPackKey> => {
@@ -345,7 +378,7 @@ export class PackReader {
       const packKey = await importPackKey(await derivePackKey(prk, packId))
       return { packKey, cacheTag }
     })()
-    this.packKeyMemo = { packId, packRootKey: prk, resolved }
+    this.packKeyMemo = { packId, packRootKeySource, resolved }
     return resolved
   }
 

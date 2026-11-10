@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL as NodeURL } from 'node:url'
 import {
@@ -339,6 +339,28 @@ describe('PackReader v3 encryption', () => {
       packId: PACK_ID,
     })
     expect(new TextDecoder().decode(data)).toBe('Secret content')
+  })
+
+  it('reuses the derived key for the same ArrayBuffer PRK (memoizes by buffer, not view)', async () => {
+    const buf = await buildEncryptedPack({ path: 'secret.txt', text: 'Secret content', packRootKey: PRK })
+    const reader = PackReader.fromBuffer(buf)
+    // `ArrayBuffer` を渡すたびに `new Uint8Array(...)` のビューが作り直される。
+    // ビュー参照で比較するとメモが効かず、毎回 SHA-256/HKDF をやり直してしまう。
+    const prkBuffer = PRK.buffer.slice(PRK.byteOffset, PRK.byteOffset + PRK.byteLength)
+    const digest = vi.spyOn(crypto.subtle, 'digest')
+
+    await reader.readEntry('secret.txt', { packRootKey: prkBuffer, packId: PACK_ID })
+    const firstCalls = digest.mock.calls.length
+    expect(firstCalls).toBeGreaterThan(0)
+
+    const second = await reader.readEntry('secret.txt', {
+      packRootKey: prkBuffer,
+      packId: PACK_ID,
+    })
+
+    expect(new TextDecoder().decode(second)).toBe('Secret content')
+    expect(digest.mock.calls.length).toBe(firstCalls)
+    digest.mockRestore()
   })
 
   it('throws PackKeyRequiredError when the entry is encrypted but no key is given', async () => {
