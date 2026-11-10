@@ -1,7 +1,7 @@
 /**
  * format.test.ts
  *
- * TDD tests for the opfspack binary format specification.
+ * TDD tests for the nartik binary format specification.
  * Tests are written FIRST to define the expected behavior.
  *
  * Binary layout:
@@ -18,6 +18,7 @@ import {
   LITTLE_ENDIAN,
   PackFlags,
   EntryFlags,
+  ENTRY_FLAGS_KNOWN_MASK,
   serializeHeader,
   deserializeHeader,
   serializeIndexEntry,
@@ -33,21 +34,21 @@ import {
 // ─────────────────────────────────────────────
 
 describe('Constants', () => {
-  it('MAGIC is the 4-byte ASCII string OPFS', () => {
-    expect(MAGIC).toBe('OPFS')
+  it('MAGIC is the 4-byte ASCII string NRTK', () => {
+    expect(MAGIC).toBe('NRTK')
   })
 
-  it('MAGIC_NUMBER is 0x4F504653 (little-endian bytes: 4F 50 46 53)', () => {
+  it('MAGIC_NUMBER is 0x4E52544B (little-endian bytes: 4E 52 54 4B)', () => {
     // 'T'=0x54, 'D'=0x44, 'P'=0x50, 'K'=0x4B
-    expect(MAGIC_NUMBER).toEqual(new Uint8Array([0x4f, 0x50, 0x46, 0x53]))
+    expect(MAGIC_NUMBER).toEqual(new Uint8Array([0x4e, 0x52, 0x54, 0x4b]))
   })
 
   it('HEADER_SIZE is exactly 64 bytes', () => {
     expect(HEADER_SIZE).toBe(64)
   })
 
-  it('FORMAT_VERSION is 2', () => {
-    expect(FORMAT_VERSION).toBe(2)
+  it('FORMAT_VERSION is 3 (v3 = ルート鍵 + ラップ。v2 は読めない)', () => {
+    expect(FORMAT_VERSION).toBe(3)
   })
 
   it('LITTLE_ENDIAN is true', () => {
@@ -97,13 +98,18 @@ describe('EntryFlags', () => {
     expect(EntryFlags.Encrypted).toBe(2)
   })
 
-  it('IdentityBound is 1 << 2 = 4 (Phase 2 optional identity binding)', () => {
+  it('IdentityBound is 1 << 2 = 4 (v2 の識別束縛。v3 では未知ビット)', () => {
     expect(EntryFlags.IdentityBound).toBe(4)
   })
 
-  it('all flags can be combined', () => {
-    const all = EntryFlags.Compressed | EntryFlags.Encrypted | EntryFlags.IdentityBound
-    expect(all).toBe(7)
+  it('KNOWN_MASK は Compressed | Encrypted のみ（v3 の IdentityBound は定義済みビットではない）', () => {
+    expect(ENTRY_FLAGS_KNOWN_MASK).toBe(3)
+    expect(ENTRY_FLAGS_KNOWN_MASK & EntryFlags.IdentityBound).toBe(0)
+  })
+
+  it('all known entry flags can be combined', () => {
+    const all = EntryFlags.Compressed | EntryFlags.Encrypted
+    expect(all).toBe(ENTRY_FLAGS_KNOWN_MASK)
   })
 })
 
@@ -112,8 +118,8 @@ describe('EntryFlags', () => {
 // ─────────────────────────────────────────────
 
 describe('validateMagic', () => {
-  it('returns true for valid OPFS magic bytes', () => {
-    const buf = new Uint8Array([0x4f, 0x50, 0x46, 0x53])
+  it('returns true for valid NRTK magic bytes', () => {
+    const buf = new Uint8Array([0x4e, 0x52, 0x54, 0x4b])
     expect(validateMagic(buf)).toBe(true)
   })
 
@@ -139,7 +145,7 @@ describe('validateMagic', () => {
 
 describe('serializeHeader / deserializeHeader', () => {
   const sampleHeader: PackHeader = {
-      magic: new Uint8Array([0x4f, 0x50, 0x46, 0x53]),
+      magic: new Uint8Array([0x4e, 0x52, 0x54, 0x4b]),
       version: FORMAT_VERSION,
     flags: PackFlags.None,
     reserved: 0,
@@ -155,13 +161,13 @@ describe('serializeHeader / deserializeHeader', () => {
     expect(buf.byteLength).toBe(HEADER_SIZE)
   })
 
-  it('first 4 bytes are OPFS magic', () => {
+  it('first 4 bytes are NRTK magic', () => {
     const buf = serializeHeader(sampleHeader)
     const view = new Uint8Array(buf)
-    expect(view[0]).toBe(0x4f) // O
-    expect(view[1]).toBe(0x50) // P
-    expect(view[2]).toBe(0x46) // F
-    expect(view[3]).toBe(0x53) // S
+    expect(view[0]).toBe(0x4e) // N
+    expect(view[1]).toBe(0x52) // R
+    expect(view[2]).toBe(0x54) // T
+    expect(view[3]).toBe(0x4b) // K
   })
 
   it('version field at offset 4 is little-endian uint32', () => {

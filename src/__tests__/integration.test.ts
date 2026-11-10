@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { expectBytesEqual } from './byte-compare'
 import { PackBuilder } from '../builder'
 import { PackReader } from '../reader'
 import { PackManager, MemoryPackStorage, type PackFile } from '../manager'
 import { OPFSPackStorage } from '../storage/opfs'
+import { PackKeyRequiredError } from '../errors'
 import { PackWorker } from '../arrow/worker'
 import { migrateToPacks, validatePack } from '../migration'
 function createRandomData(size: number): Uint8Array {
@@ -39,6 +41,11 @@ function createMockWritable() {
 function createMockFile(data: ArrayBuffer) {
   return {
     arrayBuffer: vi.fn(async () => data),
+    // OPFS の `File` と同じく範囲読みできる（`PackReader.fromOPFS` はこちらを使う）
+    slice: (start = 0, end: number = data.byteLength) => ({
+      size: Math.max(0, end - start),
+      arrayBuffer: async () => data.slice(start, end),
+    }),
     size: data.byteLength,
     name: 'mock-file',
     type: 'application/octet-stream',
@@ -160,7 +167,7 @@ describe('Integration: End-to-End Roundtrip', () => {
 
       await manager.createPack(packId, files)
       const readData = await manager.readFile(packId, 'data.bin')
-      expect(new Uint8Array(readData)).toEqual(data)
+      expectBytesEqual(new Uint8Array(readData), data)
     }
   })
 
@@ -180,36 +187,51 @@ describe('Integration: End-to-End Roundtrip', () => {
     reader.close()
   })
 
-  it('roundtrips with identity binding enabled', async () => {
+  it('roundtrips with a pack root key (v3 encryption)', async () => {
     const storage = new MemoryPackStorage()
     const manager = new PackManager(storage)
+    const packRootKey = Uint8Array.from({ length: 32 }, (_, index) => index)
     const data = new TextEncoder().encode('secret identity data')
     const files: PackFile[] = [{ path: 'secret.txt', data, mimeType: 'text/plain' }]
 
-    await manager.createPack('identity-pack', files, {
-      identityBinding: true,
-    })
+    await manager.createPack('identity-pack', files, { packRootKey })
 
     const readData = await manager.readFile('identity-pack', 'secret.txt', {
-      identitySub: 'user-sub-test',
+      packRootKey,
       packId: 'identity-pack',
     })
     expect(new TextDecoder().decode(readData)).toBe('secret identity data')
   })
 
-  it('roundtrips with compression + identity binding combined', async () => {
+  it('refuses to read an encrypted pack without the pack root key', async () => {
     const storage = new MemoryPackStorage()
     const manager = new PackManager(storage)
+    const packRootKey = Uint8Array.from({ length: 32 }, (_, index) => index)
+    const files: PackFile[] = [
+      { path: 'secret.txt', data: new TextEncoder().encode('secret'), mimeType: 'text/plain' },
+    ]
+
+    await manager.createPack('identity-pack-2', files, { packRootKey })
+
+    await expect(manager.readFile('identity-pack-2', 'secret.txt')).rejects.toThrow(
+      PackKeyRequiredError,
+    )
+  })
+
+  it('roundtrips with compression + encryption combined', async () => {
+    const storage = new MemoryPackStorage()
+    const manager = new PackManager(storage)
+    const packRootKey = Uint8Array.from({ length: 32 }, (_, index) => 255 - index)
     const data = new TextEncoder().encode('x'.repeat(5000))
     const files: PackFile[] = [{ path: 'combo.txt', data, mimeType: 'text/plain' }]
 
     await manager.createPack('combo-pack', files, {
       compression: 'deflate',
-      identityBinding: true,
+      packRootKey,
     })
 
     const readData = await manager.readFile('combo-pack', 'combo.txt', {
-      identitySub: 'user-sub-test',
+      packRootKey,
       packId: 'combo-pack',
     })
     expect(new TextDecoder().decode(readData)).toBe('x'.repeat(5000))
@@ -471,7 +493,7 @@ describe('Integration: Multiple entries stress test', () => {
     const reader = PackReader.fromBuffer(pack)
 
     const actual = await reader.readEntry('large.bin')
-    expect(new Uint8Array(actual)).toEqual(data)
+    expectBytesEqual(new Uint8Array(actual), data)
     reader.close()
   })
 })

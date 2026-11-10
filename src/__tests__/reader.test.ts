@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath, URL as NodeURL } from 'node:url'
 import {
   MAGIC_NUMBER,
   HEADER_SIZE,
@@ -11,13 +13,17 @@ import {
   calcIndexEntrySize,
 } from '../format.js'
 import {
-  deriveMasterKey,
   derivePackKey,
+  importPackKey,
   encryptEntry,
 } from '../auth/identity-key.js'
 import { deflateSync } from 'fflate'
 import { PackReader } from '../reader.js'
-import { PackVersionError, PackCorruptedError } from '../errors.js'
+import {
+  PackVersionError,
+  PackCorruptedError,
+  PackKeyRequiredError,
+} from '../errors.js'
 import type { PackEntryInfo } from '../types.js'
 
 const CRC32_TABLE = (() => {
@@ -45,11 +51,13 @@ interface TestEntry {
   mimeType: string
   data: Uint8Array
   flags?: number
+  iv?: Uint8Array
   uncompressedSize?: bigint
 }
 
 function buildPackFile(options: {
   version?: number
+  flags?: number
   entries?: TestEntry[]
   corruptMagic?: boolean
   corruptIndexCrc?: boolean
@@ -67,7 +75,7 @@ function buildPackFile(options: {
       size,
       compressedSize: BigInt(entry.data.byteLength),
       flags: entry.flags ?? EntryFlags.None,
-      iv: new Uint8Array(12),
+      iv: entry.iv ?? new Uint8Array(12),
     }
     dataPos += entry.data.byteLength
     return record
@@ -83,7 +91,7 @@ function buildPackFile(options: {
   const headerBuf = serializeHeader({
     magic: MAGIC_NUMBER,
     version,
-    flags: PackFlags.None,
+    flags: options.flags ?? PackFlags.None,
     reserved: 0,
     indexOffset,
     indexSize,
@@ -288,41 +296,192 @@ describe('PackReader fromOPFS', () => {
   })
 })
 
-describe('PackReader identity binding', () => {
-  it('decrypts identity-bound entries', async () => {
-    const raw = new TextEncoder().encode('Secret content')
-    const masterKey = await deriveMasterKey('user-123')
-    const packKey = await derivePackKey(masterKey, 'pack-abc')
+describe('PackReader v3 encryption', () => {
+  const PACK_ID = 'pack-abc'
+  const PRK = Uint8Array.from({ length: 32 }, (_, index) => index)
+  const WRONG_PRK = Uint8Array.from({ length: 32 }, (_, index) => 255 - index)
+
+  async function buildEncryptedPack(options: {
+    path: string
+    text: string
+    packRootKey: Uint8Array
+    packId?: string
+    headerFlags?: number
+  }): Promise<ArrayBuffer> {
+    const packKey = await importPackKey(
+      await derivePackKey(options.packRootKey, options.packId ?? PACK_ID),
+    )
+    const raw = new TextEncoder().encode(options.text)
     const rawBuf = new ArrayBuffer(raw.byteLength)
     new Uint8Array(rawBuf).set(raw)
     const { encrypted, iv } = await encryptEntry(rawBuf, packKey)
 
-    const entry: TestEntry = {
-      path: 'secret.txt',
-      mimeType: 'text/plain',
-      data: new Uint8Array(encrypted),
-      flags: EntryFlags.IdentityBound,
-    }
+    return buildPackFile({
+      flags: options.headerFlags ?? PackFlags.Encrypted,
+      entries: [
+        {
+          path: options.path,
+          mimeType: 'text/plain',
+          data: new Uint8Array(encrypted),
+          flags: EntryFlags.Encrypted,
+          iv,
+        },
+      ],
+    })
+  }
 
-    let buf = buildPackFile({ entries: [entry] })
-
-    const indexOffset = Number(new DataView(buf).getBigUint64(16, LITTLE_ENDIAN))
-    const indexSize = Number(new DataView(buf).getBigUint64(24, LITTLE_ENDIAN))
-    const pathBytes = new TextEncoder().encode(entry.path).byteLength
-    const mimeBytes = new TextEncoder().encode(entry.mimeType).byteLength
-    const ivOffset = indexOffset + 2 + pathBytes + 2 + mimeBytes + 8 + 8 + 8 + 4
-    new Uint8Array(buf).set(iv, ivOffset)
-
-    const indexData = new Uint8Array(buf, indexOffset, indexSize - 4)
-    const newCrc = crc32(indexData)
-    new DataView(buf).setUint32(indexOffset + indexSize - 4, newCrc, LITTLE_ENDIAN)
-
+  it('decrypts an encrypted entry with the pack root key', async () => {
+    const buf = await buildEncryptedPack({ path: 'secret.txt', text: 'Secret content', packRootKey: PRK })
     const reader = PackReader.fromBuffer(buf)
+
     const data = await reader.readEntry('secret.txt', {
-      identitySub: 'user-123',
-      packId: 'pack-abc',
+      packRootKey: PRK,
+      packId: PACK_ID,
     })
     expect(new TextDecoder().decode(data)).toBe('Secret content')
+  })
+
+  it('reuses the derived key for the same ArrayBuffer PRK (memoizes by buffer, not view)', async () => {
+    const buf = await buildEncryptedPack({ path: 'secret.txt', text: 'Secret content', packRootKey: PRK })
+    const reader = PackReader.fromBuffer(buf)
+    // `ArrayBuffer` を渡すたびに `new Uint8Array(...)` のビューが作り直される。
+    // ビュー参照で比較するとメモが効かず、毎回 SHA-256/HKDF をやり直してしまう。
+    const prkBuffer = PRK.buffer.slice(PRK.byteOffset, PRK.byteOffset + PRK.byteLength)
+    const digest = vi.spyOn(crypto.subtle, 'digest')
+
+    await reader.readEntry('secret.txt', { packRootKey: prkBuffer, packId: PACK_ID })
+    const firstCalls = digest.mock.calls.length
+    expect(firstCalls).toBeGreaterThan(0)
+
+    const second = await reader.readEntry('secret.txt', {
+      packRootKey: prkBuffer,
+      packId: PACK_ID,
+    })
+
+    expect(new TextDecoder().decode(second)).toBe('Secret content')
+    expect(digest.mock.calls.length).toBe(firstCalls)
+    digest.mockRestore()
+  })
+
+  it('throws PackKeyRequiredError when the entry is encrypted but no key is given', async () => {
+    const buf = await buildEncryptedPack({ path: 'secret.txt', text: 'Secret content', packRootKey: PRK })
+    const reader = PackReader.fromBuffer(buf)
+
+    await expect(reader.readEntry('secret.txt')).rejects.toThrow(PackKeyRequiredError)
+  })
+
+  it('throws PackCorruptedError with a wrong pack root key (GCM のタグ検証)', async () => {
+    const buf = await buildEncryptedPack({ path: 'secret.txt', text: 'Secret content', packRootKey: PRK })
+    const reader = PackReader.fromBuffer(buf)
+
+    await expect(
+      reader.readEntry('secret.txt', { packRootKey: WRONG_PRK, packId: PACK_ID }),
+    ).rejects.toThrow(PackCorruptedError)
+  })
+
+  it('throws PackKeyRequiredError when the same entry is read again without a key', async () => {
+    const buf = await buildEncryptedPack({ path: 'secret.txt', text: 'Secret content', packRootKey: PRK })
+    const reader = PackReader.fromBuffer(buf)
+
+    const first = await reader.readEntry('secret.txt', { packRootKey: PRK, packId: PACK_ID })
+    expect(new TextDecoder().decode(first)).toBe('Secret content')
+
+    // 1 回目でキャッシュに載っていても、鍵なしの読み出しに平文を返してはいけない
+    await expect(reader.readEntry('secret.txt')).rejects.toThrow(PackKeyRequiredError)
+  })
+
+  it('throws PackCorruptedError when the same entry is read again with another key', async () => {
+    const buf = await buildEncryptedPack({ path: 'secret.txt', text: 'Secret content', packRootKey: PRK })
+    const reader = PackReader.fromBuffer(buf)
+
+    const first = await reader.readEntry('secret.txt', { packRootKey: PRK, packId: PACK_ID })
+    expect(new TextDecoder().decode(first)).toBe('Secret content')
+
+    // 別の PRK では復号できないので、キャッシュされた平文を返してはいけない
+    await expect(
+      reader.readEntry('secret.txt', { packRootKey: WRONG_PRK, packId: PACK_ID }),
+    ).rejects.toThrow(PackCorruptedError)
+  })
+
+  it('does not serve a cached plaintext for the real v3-encrypted.nartik fixture', async () => {
+    const fixture = readFileSync(
+      fileURLToPath(new NodeURL('../../v3-encrypted.nartik', import.meta.url)),
+    )
+    const buffer = fixture.buffer.slice(
+      fixture.byteOffset,
+      fixture.byteOffset + fixture.byteLength,
+    ) as ArrayBuffer
+    const reader = PackReader.fromBuffer(buffer)
+    // gen-fixtures.ts: pack_id = "test-pack" / PRK = 00 01 … 1f
+    const packRootKey = Uint8Array.from({ length: 32 }, (_, index) => index)
+
+    const decrypted = await reader.readEntry('metadata.json', {
+      packRootKey,
+      packId: 'test-pack',
+    })
+    expect(new TextDecoder().decode(decrypted)).toContain('Test Book')
+
+    await expect(reader.readEntry('metadata.json')).rejects.toThrow(PackKeyRequiredError)
+    await expect(
+      reader.readEntry('metadata.json', {
+        packRootKey: Uint8Array.from({ length: 32 }, (_, index) => 255 - index),
+        packId: 'test-pack',
+      }),
+    ).rejects.toThrow(PackCorruptedError)
+  })
+
+  it('rejects a v2 pack (v3 のみ。再取り込みが要る)', () => {
+    const buf = buildPackFile({ version: 2 })
+    expect(() => PackReader.fromBuffer(buf)).toThrow(PackVersionError)
+  })
+
+  it('rejects the v2 IDENTITY_BOUND flag as an unknown entry flag', async () => {
+    const buf = await buildEncryptedPack({
+      path: 'bound.txt',
+      text: 'bound content',
+      packRootKey: PRK,
+    })
+    // v2 の識別束縛ビットを立てる（v3 では定義済みビットではない）
+    const indexOffset = Number(new DataView(buf).getBigUint64(16, LITTLE_ENDIAN))
+    const indexSize = Number(new DataView(buf).getBigUint64(24, LITTLE_ENDIAN))
+    const pathBytes = new TextEncoder().encode('bound.txt').byteLength
+    const mimeBytes = new TextEncoder().encode('text/plain').byteLength
+    const flagsOffset = indexOffset + 2 + pathBytes + 2 + mimeBytes + 8 + 8 + 8
+    const view = new DataView(buf)
+    view.setUint32(flagsOffset, EntryFlags.Encrypted | EntryFlags.IdentityBound, LITTLE_ENDIAN)
+    const newCrc = crc32(new Uint8Array(buf, indexOffset, indexSize - 4))
+    view.setUint32(indexOffset + indexSize - 4, newCrc, LITTLE_ENDIAN)
+
+    const reader = PackReader.fromBuffer(buf)
+    expect(() => reader.listEntries()).toThrow(PackCorruptedError)
+    await expect(
+      reader.readEntry('bound.txt', { packRootKey: PRK, packId: PACK_ID }),
+    ).rejects.toThrow('unknown entry flags')
+  })
+
+  it('rejects a plaintext entry in a pack whose header claims ENCRYPTED', () => {
+    const buf = buildPackFile({
+      flags: PackFlags.Encrypted,
+      entries: [
+        {
+          path: 'plain.txt',
+          mimeType: 'text/plain',
+          data: new TextEncoder().encode('plain'),
+          flags: EntryFlags.None,
+        },
+      ],
+    })
+    expect(() => PackReader.fromBuffer(buf).listEntries()).toThrow(PackCorruptedError)
+  })
+
+  it('rejects an encrypted entry in a pack without the ENCRYPTED header flag', async () => {
+    const buf = await buildEncryptedPack({
+      path: 'secret.txt',
+      text: 'Secret content',
+      packRootKey: PRK,
+      headerFlags: PackFlags.None,
+    })
+    expect(() => PackReader.fromBuffer(buf).listEntries()).toThrow(PackCorruptedError)
   })
 })
 

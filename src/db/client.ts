@@ -1,20 +1,6 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
 import { drizzle } from 'drizzle-orm/sqlite-proxy'
 
-const isNode = typeof process !== 'undefined' && Boolean(process.versions?.node)
-
-async function getModuleOptions() {
-  if (isNode) {
-    const { readFileSync } = await import('node:fs')
-    const { fileURLToPath } = await import('node:url')
-    const wasmPath = fileURLToPath(
-      import.meta.resolve('@sqlite.org/sqlite-wasm/sqlite3.wasm')
-    )
-    return { wasmBinary: readFileSync(wasmPath) }
-  }
-  return {}
-}
-
 function normalizeParam(value: unknown): unknown {
   if (value === null || value === undefined) return null
   if (typeof value === 'boolean') return value ? 1 : 0
@@ -24,8 +10,8 @@ function normalizeParam(value: unknown): unknown {
 }
 
 export async function createPackIndexDB() {
-  const options = await getModuleOptions()
-  const sqlite3Instance = await sqlite3InitModule(options as any)
+  // 3.54 以降の node ビルドは隣接 sqlite3.wasm を自前で解決するので引数は不要。
+  const sqlite3Instance = await sqlite3InitModule()
 
   const connection = new sqlite3Instance.oo1.DB(':memory:')
   

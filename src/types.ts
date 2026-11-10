@@ -75,14 +75,12 @@ export type PackOptions = {
   compression?: 'none' | 'deflate'
 
   /**
-   * Whether to bind the pack to the user's identity key.
+   * v3 の pack ルート鍵（PRK、32B）。
    *
-   * When `true`, the pack header and every entry are cryptographically
-   * bound to the current identity, preventing repudiation.
-   *
-   * @default false
+   * 渡すと `pack_key = HKDF(PRK, pack_id)`（`pack_id` は作成する pack の id）で
+   * **全エントリ**を AES-256-GCM 暗号化する。省略すると平文の pack を書く。
    */
-  identityBinding?: boolean
+  packRootKey?: Uint8Array | ArrayBuffer
 }
 
 /**
@@ -90,7 +88,17 @@ export type PackOptions = {
  */
 export type ReadOptions = {
   decompress?: boolean
-  identitySub?: string
+
+  /**
+   * v3 の pack ルート鍵（PRK、32B）。
+   *
+   * `packId` とセットで渡すと、暗号化されたエントリを
+   * `pack_key = HKDF(PRK, pack_id)` で復号する。暗号化エントリに鍵が無い場合は
+   * `PackKeyRequiredError` を投げる（暗号文を平文として返さない）。
+   */
+  packRootKey?: Uint8Array | ArrayBuffer
+
+  /** PRK から pack 鍵を導出するための pack_id（本の id）。 */
   packId?: string
 }
 

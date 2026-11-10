@@ -68,8 +68,8 @@ export class PackManager {
   ): Promise<void> {
     const builder = new PackBuilder({
       compress: options?.compression === 'deflate',
-      identityBinding: options?.identityBinding,
-      packId: options?.identityBinding ? packId : undefined,
+      packRootKey: options?.packRootKey,
+      packId: options?.packRootKey ? packId : undefined,
     })
 
     for (const file of files) {

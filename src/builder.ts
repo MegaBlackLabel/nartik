@@ -10,15 +10,21 @@ import {
   calcIndexEntrySize,
   crc32,
 } from './format.js'
-import { deriveMasterKey, derivePackKey, encryptEntry } from './auth/identity-key.js'
+import { derivePackKey, importPackKey, encryptEntry } from './auth/identity-key.js'
+import { PackKeyError } from './errors.js'
 import { generateIV } from './wasm-bridge.js'
 
 export interface PackBuilderOptions {
   createdAt?: bigint
   compress?: boolean
   compressionLevel?: number
-  identityBinding?: boolean
-  sub?: string
+  /**
+   * v3 の pack ルート鍵（PRK、32B）。`packId` とセットで渡すと **全エントリ**を
+   * `HKDF(PRK, packId)` の pack 鍵で暗号化する（仕様 §4.4）。
+   * 省略すると平文の v3 pack を書く。
+   */
+  packRootKey?: Uint8Array | ArrayBuffer
+  /** PRK から pack 鍵を導出するための pack_id（本の id）。 */
   packId?: string
   onProgress?: (progress: {
     phase: 'scanning' | 'packing' | 'indexing' | 'finalizing'
@@ -52,8 +58,11 @@ function align8(n: number): number {
 
 export class PackBuilder {
   private entries: BuilderEntry[] = []
-  private options: Required<Pick<PackBuilderOptions, 'createdAt' | 'compress' | 'identityBinding'>> &
-    Pick<PackBuilderOptions, 'compressionLevel' | 'sub' | 'packId' | 'onProgress'>
+  private options: Required<Pick<PackBuilderOptions, 'createdAt' | 'compress'>> &
+    Pick<
+      PackBuilderOptions,
+      'compressionLevel' | 'packRootKey' | 'packId' | 'onProgress'
+    >
 
   constructor(options: PackBuilderOptions = {}) {
     let compressionLevel = options.compressionLevel
@@ -65,12 +74,18 @@ export class PackBuilder {
       }
     }
 
+    // 片方だけでは鍵を作れない（黙って平文にしない）
+    if (Boolean(options.packRootKey) !== Boolean(options.packId)) {
+      throw new PackKeyError(
+        'packRootKey and packId must be provided together to encrypt a pack',
+      )
+    }
+
     this.options = {
       createdAt: options.createdAt ?? BigInt(Date.now()),
       compress: options.compress ?? false,
-      identityBinding: options.identityBinding ?? false,
       compressionLevel,
-      sub: options.sub,
+      packRootKey: options.packRootKey,
       packId: options.packId,
       onProgress: options.onProgress,
     }
@@ -110,10 +125,13 @@ export class PackBuilder {
     })
 
     let packKey: CryptoKey | undefined
-    
-    if (this.options.identityBinding && this.options.sub && this.options.packId) {
-      const masterKey = await deriveMasterKey(this.options.sub)
-      packKey = await derivePackKey(masterKey, this.options.packId)
+
+    const packRootKey = this.options.packRootKey
+    const packId = this.options.packId
+    if (packRootKey && packId) {
+      const prk =
+        packRootKey instanceof Uint8Array ? packRootKey : new Uint8Array(packRootKey)
+      packKey = await importPackKey(await derivePackKey(prk, packId))
     }
 
     let bytesProcessed = 0
@@ -136,7 +154,7 @@ export class PackBuilder {
         flags |= EntryFlags.Compressed
       }
 
-      if (this.options.identityBinding && packKey) {
+      if (packKey) {
         const dataCopy = new Uint8Array(data.byteLength)
         dataCopy.set(data)
         
@@ -145,7 +163,8 @@ export class PackBuilder {
         data = new Uint8Array(encrypted)
         iv = new Uint8Array(entryIv)
         
-        flags |= EntryFlags.Encrypted | EntryFlags.IdentityBound
+        // v3 は `IDENTITY_BOUND` を立てない（立っていれば読めない pack になる — 仕様 §6）
+        flags |= EntryFlags.Encrypted
         compressedSize = data.byteLength
       }
 
@@ -194,7 +213,7 @@ export class PackBuilder {
     if (this.options.compress) {
       packFlags |= PackFlags.Compressed
     }
-    if (this.options.identityBinding) {
+    if (this.options.packRootKey) {
       packFlags |= PackFlags.Encrypted
     }
 

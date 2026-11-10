@@ -1,10 +1,10 @@
-export const MAGIC = 'OPFS'
+export const MAGIC = 'NRTK'
 
-export const MAGIC_NUMBER = new Uint8Array([0x4f, 0x50, 0x46, 0x53])
+export const MAGIC_NUMBER = new Uint8Array([0x4e, 0x52, 0x54, 0x4b])
 
 export const HEADER_SIZE = 64
 
-export const FORMAT_VERSION = 2
+export const FORMAT_VERSION = 3
 
 export const LITTLE_ENDIAN = true
 
@@ -18,8 +18,22 @@ export const enum EntryFlags {
   None = 0,
   Compressed = 1 << 0,
   Encrypted = 1 << 1,
+  /**
+   * v2 の identity 束縛（`sub` 由来の鍵で暗号化した印）。
+   *
+   * **v3 では定義済みビットではない**: 鍵スケジュールは header version で選ぶので、
+   * v3 の pack でこれが立っていれば壊れた pack として拒否する（仕様 §6）。
+   */
   IdentityBound = 1 << 2,
 }
+
+/**
+ * 定義済みのエントリフラグ。これ以外が立つエントリは `Corrupted`。
+ *
+ * Rust 版の `entry_flags::KNOWN_MASK` は LZ4（`1 << 3`）も含むが、この実装は
+ * LZ4 を復号できないため含めない（LZ4 のエントリは未知フラグとして拒否する）。
+ */
+export const ENTRY_FLAGS_KNOWN_MASK = EntryFlags.Compressed | EntryFlags.Encrypted
 
 export interface PackHeader {
   magic: Uint8Array
@@ -117,7 +131,7 @@ export function deserializeHeader(buf: ArrayBuffer): PackHeader {
   magic[3] = view[3]!
 
   if (!validateMagic(magic)) {
-    throw new Error('Invalid magic number: expected OPFS')
+    throw new Error('Invalid magic number: expected NRTK')
   }
 
   const storedChecksum = dv.getUint32(60, LITTLE_ENDIAN)
@@ -190,9 +204,15 @@ export function serializeIndexEntry(entry: PackIndexEntry): ArrayBuffer {
   return buf
 }
 
-export function deserializeIndexEntry(buf: ArrayBuffer): PackIndexEntry {
-  const view = new Uint8Array(buf)
-  const dv = new DataView(buf)
+/**
+ * index の 1 レコードを読む。
+ *
+ * `Uint8Array` を受けたときはビューのままで読む（レコードごとに「後続バイト全部」を
+ * コピーしないため、`PackReader` は index の末尾までを含むビューを渡す）。
+ */
+export function deserializeIndexEntry(buf: ArrayBuffer | Uint8Array): PackIndexEntry {
+  const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+  const dv = new DataView(view.buffer, view.byteOffset, view.byteLength)
   const decoder = new TextDecoder()
 
   let pos = 0
@@ -200,13 +220,13 @@ export function deserializeIndexEntry(buf: ArrayBuffer): PackIndexEntry {
   const pathLen = dv.getUint16(pos, LITTLE_ENDIAN)
   pos += 2
 
-  const path = decoder.decode(view.slice(pos, pos + pathLen))
+  const path = decoder.decode(view.subarray(pos, pos + pathLen))
   pos += pathLen
 
   const mimeLen = dv.getUint16(pos, LITTLE_ENDIAN)
   pos += 2
 
-  const mimeType = decoder.decode(view.slice(pos, pos + mimeLen))
+  const mimeType = decoder.decode(view.subarray(pos, pos + mimeLen))
   pos += mimeLen
 
   const offset = dv.getBigUint64(pos, LITTLE_ENDIAN)

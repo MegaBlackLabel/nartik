@@ -1,4 +1,4 @@
-# Agent Context: @megablacklabel/opfspack
+# Agent Context: @megablacklabel/nartik
 
 ## What This Package Does
 
@@ -22,11 +22,15 @@ OPFS-based pack file system for browser environments. Groups files into binary p
 - Zero-copy binary data transfer via SharedArrayBuffer
 - Comlink wraps Arrow IPC transport naturally
 
-### Identity Binding Security Model
-- Anchor: Google OAuth `sub` (immutable, not email)
-- Key derivation: PBKDF2(sub + salt) → HKDF(packId) → AES-GCM 256-bit
-- Keys are non-extractable, memory-only, never persisted
-- Each entry encrypted with unique 12-byte IV
+### Key Model (v3)
+- Anchor: Google OAuth `sub` (immutable, not email) → `owner_id` = SHA-256 hash
+- PRK: random 32B per account, **never derivable from `sub`**
+- `sub` wrap KEK: PBKDF2(UTF8(sub) ‖ APP_SALT, APP_SALT, 100_000)
+- passphrase wrap KEK: PBKDF2(NFKC(passphrase), wrap salt, wrap iterations), ≤ 10M
+- Wrap: AES-256-GCM(KEK)(PRK), AAD = `"ligrol-pack-root:1:" + owner_id`
+- pack key: HKDF(PRK, pack_id, info = `nartik-entry-key`) → AES-GCM 256-bit
+- Key/PRK material is plain bytes in memory here; never log or persist it
+- Each entry encrypted with a unique 12-byte IV
 
 ## Code Patterns
 
@@ -130,7 +134,7 @@ export async function readEntryAsProxy(packId: string, entryPath: string) {
 ## Dependency Map
 
 ```
-opfspack
+nartik
 ├── wasm/                    # Rust → WASM
 │   ├── crc32fast           # SIMD CRC-32
 │   ├── aes-gcm             # Encryption
@@ -139,11 +143,13 @@ opfspack
 │   ├── format.ts           # Binary format constants
 │   ├── builder.ts          # Pack assembly
 │   ├── reader.ts           # Pack parsing + cache
+│   ├── source.ts           # PackSource（範囲読み。全体をメモリに載せない）
 │   ├── manager.ts          # Orchestration
 │   ├── wasm-bridge.ts      # WASM ↔ JS bridge
 │   ├── cache.ts            # LRU cache
 │   ├── auth/
-│   │   └── identity-key.ts # Web Crypto key derivation
+│   │   ├── identity-key.ts # PRK / KEK / pack key derivation (Web Crypto)
+│   │   └── key-bundle.ts   # ligrol-keys.json の parse と PRK の解錠
 │   ├── db/
 │   │   ├── schema.ts       # Drizzle ORM schema
 │   │   ├── client.ts       # wa-sqlite client
@@ -160,14 +166,17 @@ opfspack
 ### Error Hierarchy
 ```
 PackError (base)
-├── PackVersionError      # Unsupported format version
-├── PackCorruptedError    # CRC/checksum failure
-└── PackNotFoundError     # Pack missing from storage
+├── PackVersionError      # Unsupported format version (v2 は再取り込み)
+├── PackCorruptedError    # CRC/checksum failure, unknown flags, decrypt failure
+├── PackNotFoundError     # Pack missing from storage
+├── PackKeyRequiredError  # 暗号化エントリを鍵なしで読もうとした
+├── PackKeyError          # ラップの解錠失敗（パスフレーズ違い / 使えるラップ無し）
+└── PackKeyBundleError    # ligrol-keys.json が読めない / 別アカウント / 未知の版
 ```
 
 ### Debug Logging Points
 - WASM initialization failure (falls back to JS)
-- Identity binding key derivation
+- Pack root key unwrapping (`unlockPackRoot`)
 - Index CRC validation
 - Cache hit/miss (optional)
 
@@ -180,7 +189,7 @@ PackError (base)
 
 ### Build
 ```bash
-cd packages/opfspack/wasm
+cd wasm
 wasm-pack build --target web --out-dir pkg
 ```
 
@@ -261,7 +270,7 @@ interface PackBuilderOptions {
 
 ## Migration Notes
 
-Since the package is pre-release, there is no migration path between versions. The current format is v2 with IV field support.
+Since the package is pre-release, there is no migration path between versions. The current format is **v3** (random pack root key + wraps). v2 packs are rejected on read (`PackVersionError`) and must be re-imported; the old `sub`-derived key schedule is gone (`deriveMasterKey` → `deriveSubWrapKek`, which only unwraps the PRK).
 
 ## Git Workflow
 

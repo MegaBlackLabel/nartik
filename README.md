@@ -1,10 +1,10 @@
-# @megablacklabel/opfspack
+# @megablacklabel/nartik
 
 Browser-native pack file system for OPFS (Origin Private File System). Inspired by Unity Asset Bundle architecture.
 
 ## Overview
 
-`opfspack` groups related files into a single binary package, solving common OPFS issues:
+`nartik` groups related files into a single binary package, solving common OPFS issues:
 
 - **Many small files** → One pack file
 - **No atomicity** → Atomic pack operations
@@ -15,7 +15,7 @@ Browser-native pack file system for OPFS (Origin Private File System). Inspired 
 ## Quick Start
 
 ```typescript
-import { PackManager, MemoryPackStorage } from '@megablacklabel/opfspack'
+import { PackManager, MemoryPackStorage } from '@megablacklabel/nartik'
 
 const manager = new PackManager(new MemoryPackStorage())
 
@@ -42,14 +42,12 @@ Add the following to your `.npmrc` before installing:
 Install via Bun (requires GitHub Packages registry config):
 
 ```bash
-bun add @megablacklabel/opfspack
+bun add @megablacklabel/nartik
 ```
 
-Basic import:
-
-```typescript
-import { PackManager, MemoryPackStorage } from '@megablacklabel/opfspack'
-```
+This package was previously published as `@megablacklabel/opfspack`. The pack
+format and public API names are unchanged; only the package name and repository
+moved.
 
 ## Architecture
 
@@ -59,7 +57,7 @@ import { PackManager, MemoryPackStorage } from '@megablacklabel/opfspack'
 │   (64 bytes)    │  (variable size) │  (variable size)│
 ├─────────────────┴──────────────────┴─────────────────┤
 │                                                      │
-│  Header: magic (OPFS), version, flags,               │
+│  Header: magic (NRTK), version, flags,               │
 │          indexOffset, indexSize, entryCount          │
 │                                                      │
 │  Body: Raw/compressed entry data back-to-back        │
@@ -78,17 +76,33 @@ Read any entry in O(1) via index table.
 - Deflate (JS: fflate)
 - LZ4 (Rust/WASM)
 
-### Optional Identity Binding
-Bind packs to Gmail identity via Google OAuth `sub`:
+### Optional Encryption (v3)
+Packs are encrypted per account with `AES-256-GCM`, keyed by
+`pack_key = HKDF-SHA256(PRK, pack_id)` where `PRK` is the account's random
+**pack root key** (spec: `docs/spec/10-pack-keys.md` in the desktop app repo).
+
+The PRK never appears in a pack. It is stored wrapped — in the OS keyring on
+desktop and in Drive's `ligrol-keys.json` — and unlocked with the Google
+`sub` wrap (`deriveSubWrapKek` → `unwrapPackRoot`) or a passphrase:
 
 ```typescript
-await manager.createPack('book-123', files, {
-  identityBinding: true,
-  sub: user.sub,  // Google OAuth sub claim
+const bundle = parseKeyBundle(await fetchKeysFile())
+const prk = await unlockPackRoot(bundle, { sub: googleProfile.sub })
+
+// write
+await manager.createPack('book-123', files, { packRootKey: prk })
+
+// read
+const page = await reader.readEntry('pages/page_0001.webp', {
+  packRootKey: prk,
+  packId: 'book-123',
 })
 ```
 
-Packs are encrypted with AES-GCM. Only the same Gmail account can decrypt.
+Encrypted entries without a key throw `PackKeyRequiredError` (the ciphertext is
+never returned as plaintext). `sub` alone cannot decrypt a pack — v2's
+`deriveMasterKey`-based scheme is gone and v2 packs are rejected on read
+(`PackVersionError`); re-import them.
 
 ### Arrow IPC + SAB Worker Communication
 Zero-copy transfer between Worker and Main Thread via SharedArrayBuffer.
@@ -97,7 +111,7 @@ Zero-copy transfer between Worker and Main Thread via SharedArrayBuffer.
 Fast metadata queries without parsing pack files:
 
 ```typescript
-import { SQLitePackStorage } from '@megablacklabel/opfspack'
+import { SQLitePackStorage } from '@megablacklabel/nartik'
 
 const indexDb = new SQLitePackStorage()
 await indexDb.init()
@@ -131,9 +145,8 @@ const page = await reader.readEntry('pages/page_002.webp') // <50ms
 class PackBuilder {
   constructor(options?: {
     compress?: boolean
-    identityBinding?: boolean
-    sub?: string
-    packId?: string
+    packRootKey?: Uint8Array | ArrayBuffer  // PRK: 渡すと全エントリを暗号化
+    packId?: string                          // PRK とセットで必須
   })
 
   addEntry(path: string, data: Uint8Array, mimeType: string): void
@@ -145,18 +158,38 @@ class PackBuilder {
 
 ```typescript
 class PackReader {
-  static fromBuffer(buffer: ArrayBuffer): PackReader
+  static fromBuffer(buffer: ArrayBuffer | Uint8Array): PackReader
+  static async fromSource(source: PackSource): Promise<PackReader>
   static async fromOPFS(handle: FileSystemFileHandle): Promise<PackReader>
 
   get metadata(): PackMetadata
   hasEntry(path: string): boolean
   getEntryInfo(path: string): PackEntryInfo | undefined
   async readEntry(path: string, options?: ReadOptions): Promise<ArrayBuffer>
-  async readEntryRange(path: string, start: number, end: number): Promise<ArrayBuffer>
+  async readEntryRange(path: string, start: number, end: number, options?: ReadOptions): Promise<ArrayBuffer>
   async prefetch(paths: string[]): Promise<void>
   listEntries(): PackEntryInfo[]
 }
 ```
+
+### PackSource（部分読み）
+
+`fromSource` / `fromOPFS` は pack 全体をメモリに載せない。開くときに読むのは
+**ヘッダ（先頭 64 バイト）と index だけ**で、エントリ本体は要求されたときにその範囲だけを
+`PackSource` 越しに読む（2 GiB / 10 GiB 級の pack を想定）。`readEntryRange` も、
+平文・非圧縮のエントリなら要求された範囲だけを読む。
+
+```typescript
+interface PackSource {
+  /** ソース全体のバイト数。 */
+  readonly size: number
+  /** `offset` から最大 `length` バイトを読む（EOF では短くてよい）。 */
+  read(offset: number, length: number): Promise<Uint8Array>
+}
+```
+
+`packSourceFromBytes(bytes)` / `packSourceFromBlob(blob)` を使うか、Range 対応の HTTP
+レスポンスなどに合わせて自前で実装する。
 
 ### PackManager
 
@@ -176,8 +209,8 @@ class PackManager {
 
 | Field | Size | Description |
 |-------|------|-------------|
-| Magic | 4 bytes | `OPFS` (0x4F504653) |
-| Version | 4 bytes | Format version (2) |
+| Magic | 4 bytes | `NRTK` (0x4E52544B) |
+| Version | 4 bytes | Format version (3) |
 | Flags | 4 bytes | Global pack flags |
 | Reserved | 4 bytes | Padding |
 | Index Offset | 8 bytes | Byte offset to index table |
@@ -216,17 +249,6 @@ bun run typecheck
 bun run test:run
 ```
 
-### WASM Note
-
-WASM compression requires building the Rust module before use:
-
-- Target: `wasm32-unknown-unknown`
-- Tool: `wasm-pack build --target web --out-dir pkg`
-
-OPFS requires cross-origin isolation for SharedArrayBuffer support.
-
-Bundle size impact: WASM + JS glue ~65KB compressed, LZ4 adds ~10KB, total <100KB.
-
 ## License
 
-[MIT](./LICENSE)
+MIT
